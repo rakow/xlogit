@@ -69,7 +69,7 @@ class MixedLogit(ChoiceModel):
     def fit(self, X, y, varnames, alts, ids, randvars, isvars=None, weights=None, avail=None,  panels=None,
             base_alt=None, fit_intercept=False, init_coeff=None, maxiter=2000, random_state=None, n_draws=1000,
             halton=True, verbose=1, batch_size=None, halton_opts=None, tol_opts=None, robust=False, num_hess=False,
-            scale_factor=None, optim_method="BFGS", mnl_init=True, addit=None, skip_std_errs=False):
+            fixedvars=None, scale_factor=None, optim_method="BFGS", mnl_init=True, addit=None, skip_std_errs=False):
         """Fit Mixed Logit models.
 
         Parameters
@@ -168,6 +168,9 @@ class MixedLogit(ChoiceModel):
         robust: bool, default=False
             Whether robust standard errors should be computed
 
+        fixedvars: dict, default=None
+            Dictionary with fixed variables and their values. Values can be none to use the initial value.
+
         num_hess: bool, default=False
             Whether numerical hessian should be used for estimation of standard errors
 
@@ -206,14 +209,27 @@ class MixedLogit(ChoiceModel):
         if tol_opts is not None:
             tol.update(tol_opts)
 
+        coef_names = np.append(Xnames, np.char.add("sd.", Xnames[self._rvidx]))
+        
+        # Mask gradient for fixed coefficients
+        mask = None
+        if fixedvars is not None:
+            mask = np.zeros(len(fixedvars), dtype=np.int32)
+            for i, (k, v)in enumerate(fixedvars.items()):
+                idx = np.where(coef_names == k)[0]
+                if len(idx) == 0:
+                    raise ValueError(f"Variable {k} not found in the model.")
+                mask[i] = idx
+                if v is not None:
+                    betas[idx] = v
+
         Xd, scale_d, addit_d, avail = diff_nonchosen_chosen(X, y, scale, addit, avail)  # Setup Xd as Xij - Xi*
-        fargs = (Xd, panels, draws, weights, avail, scale_d, addit_d, batch_size)
+        fargs = (Xd, panels, draws, weights, avail, scale_d, addit_d, mask, batch_size)
         if scale_factor is not None:
             optim_method = "L-BFGS-B"
+
         optim_res = _minimize(self._loglik_gradient, betas, args=fargs, method=optim_method, tol=tol['ftol'],
                               options={'gtol': tol['gtol'], 'maxiter': maxiter, 'disp': verbose > 1})        
-
-        coef_names = np.append(Xnames, np.char.add("sd.", Xnames[self._rvidx]))
 
         if scale_factor is not None:
             coef_names = np.append(coef_names, "_scale_factor")
@@ -334,8 +350,7 @@ class MixedLogit(ChoiceModel):
         if not np.array_equal(coeff_names, self.coeff_names):
             raise ValueError("The provided 'varnames' yield coefficient names that are inconsistent with the stored "
                              "in 'self.coeff_names'")
-        
-        
+                
         lambdac = 1 if scale_factor is None else betas[-1]
         sca = 0 if scale_factor is None else scale[:, :, None]
         addit = 0 if addit is None else addit[:, :, None]
@@ -458,7 +473,7 @@ class MixedLogit(ChoiceModel):
                 self._rvidx.append(False)
         self._rvidx = np.array(self._rvidx)
 
-    def _loglik_gradient(self, betas, Xd, panels, draws, weights, avail, scale_d, addit_d, batch_size, return_gradient=True):
+    def _loglik_gradient(self, betas, Xd, panels, draws, weights, avail, scale_d, addit_d, mask, batch_size, return_gradient=True):
         """Compute the log-likelihood and gradient.
 
         Fixed and random parameters are handled separately to speed up the estimation and the results are concatenated.
@@ -486,8 +501,11 @@ class MixedLogit(ChoiceModel):
             # Utility for random parameters 
             Br = self._transform_rand_betas(betas, draws_)  # Get random coefficients
             Vdr = dev.cust_einsum("njk,nkr -> njr", Xdr, Br)  # (N,J-1,R)
-            
-            eVd = dev.np.exp(Vdf[:, :, None] + Vdr - scad + additd)
+
+            Vd = Vdf[:, :, None] + Vdr - scad + additd
+            Vd = dev.np.clip(Vd, -700, 700)  # Avoid overflow
+            print("Vd: ", np.max(Vd))
+            eVd = dev.np.exp(Vd)
             Vdr, Br = None, None # Release memory
             eVd = eVd if avail is None else eVd*avail[:, :, None]  # Availablity of alts.
             # TODO: Handle availability
@@ -534,7 +552,14 @@ class MixedLogit(ChoiceModel):
             if weights is not None:
                 weights = weights if panels is None else weights[panels]  # (N,)
                 grad_n = grad_n*weights[:, None]
-            grad = grad_n.sum(axis=0)
+                
+            #grad_n = dev.np.clip(grad_n, -0.1, 0.1)
+                
+            grad = grad_n.sum(axis=0)            
+
+            if mask is not None:
+                grad[mask] = 0
+            
             output += (-grad, grad_n)
 
         return _unpack_tuple(output)
