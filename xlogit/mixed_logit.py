@@ -7,6 +7,11 @@ from ._device import device as dev
 from .multinomial_logit import MultinomialLogit
 from ._optimize import _minimize, _numerical_hessian
 import numpy as np
+import warnings
+
+from scipy.stats import truncnorm
+
+TN = truncnorm(0, np.inf)
 
 """
 Notations
@@ -92,7 +97,7 @@ class MixedLogit(ChoiceModel):
         randvars : dict
             Names (keys) and mixing distributions (values) of variables that have random parameters as coefficients.
             Possible mixing distributions are: ``'n'``: normal, ``'ln'``: lognormal, ``'u'``: uniform,
-            ``'t'``: triangular, ``'tn'``: truncated normal
+            ``'t'``: triangular, ``'tn'``: truncated normal, ```tn2``: truncated normal with scipy random generator.
 
         isvars : list-like
             Names of individual-specific variables in ``varnames``
@@ -503,8 +508,12 @@ class MixedLogit(ChoiceModel):
             Vdr = dev.cust_einsum("njk,nkr -> njr", Xdr, Br)  # (N,J-1,R)
 
             Vd = Vdf[:, :, None] + Vdr - scad + additd
-            Vd = dev.np.clip(Vd, -700, 700)  # Avoid overflow
-            print("Vd: ", np.max(Vd))
+            # print("Vd: ", np.max(Vd))
+            if dev.np.abs(dev.np.max(Vd)) > 700:
+                warnings.warn("Overflow in utility computation. Results may be inaccurate.", RuntimeWarning)
+                Vd = dev.np.clip(Vd, -700, 700)
+
+
             eVd = dev.np.exp(Vd)
             Vdr, Br = None, None # Release memory
             eVd = eVd if avail is None else eVd*avail[:, :, None]  # Availablity of alts.
@@ -632,6 +641,8 @@ class MixedLogit(ChoiceModel):
                     (1 - np.sqrt(2*(1 - draws_k)))*(draws_k > .5)
             elif dist == 'u':  # Uniform
                 draws[:, k, :] = 2*draws[:, k, :] - 1
+            elif dist == 'tn2':
+                draws[:, k, :] = TN.ppf(draws[:, k, :])
 
         return draws  # (N,Kr,R)
 
@@ -683,8 +694,8 @@ class MixedLogit(ChoiceModel):
             raise ValueError("The 'randvars' parameter is required for Mixed Logit estimation")
         if not set(randvars.keys()).issubset(Xnames):
             raise ValueError("Some variable names in 'randvars' were not found in the list of variable names")
-        if not set(randvars.values()).issubset(["n", "ln", "t", "tn", "u"]):
-            raise ValueError("Wrong mixing distribution in 'randvars'. Accepted distrubtions are n, ln, t, u, tn")
+        if not set(randvars.values()).issubset(["n", "ln", "t", "tn", "tn2", "u"]):
+            raise ValueError("Wrong mixing distribution in 'randvars'. Accepted distrubtions are n, ln, t, u, tn, tn2")
 
     def summary(self):
         """Show estimation results in console."""
