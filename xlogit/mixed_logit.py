@@ -443,7 +443,7 @@ class MixedLogit(ChoiceModel):
             avail = avail.reshape(N, J)
 
         # Generate draws
-        n_samples = N if panels is None else panels[-1] + 1
+        n_samples = N if panels is None else np.max(panels) + 1
         draws = self._generate_draws(n_samples, R, halton, halton_opts=halton_opts)
         draws = draws if panels is None else draws[panels]  # (N,Kr,R)
       
